@@ -5,7 +5,34 @@ Jogo de tiro em primeira pessoa (FPS) para **Android**, escrito em **Kotlin** co
 nenhum arquivo de modelo ou imagem: a arena, as texturas e a arma sao geradas em
 codigo.
 
-## Requisitos
+## Baixar o APK pronto (nao precisa instalar nada)
+
+O GitHub Actions compila o jogo a cada `push` e publica o APK na release
+**latest**. Baixe este link **direto no celular**:
+
+**https://github.com/eric2021r/doido-do-tiro-1/releases/download/latest/arena-fps-debug.apk**
+
+Abra o arquivo baixado e autorize "instalar apps de fontes desconhecidas".
+O app aparece na gaveta como **Arena FPS**.
+
+> O pacote do build de debug e `com.example.fpsarena.debug`, entao ele convive
+> em paz com uma versao de release instalada ao mesmo tempo.
+
+## Compilacao automatica (GitHub Actions)
+
+O workflow fica em `.github/workflows/build-apk.yml` e roda:
+
+1. em todo `push` na branch `main`;
+2. manualmente, pelo botao **Run workflow** na aba *Actions*.
+
+Ele compila o APK de debug, guarda como artifact (aba *Actions > run > Artifacts*)
+e atualiza a release `latest` com o arquivo `arena-fps-debug.apk`.
+
+A keystore de debug fica em cache entre as execucoes, para o Android aceitar
+instalar um build novo por cima do antigo. Se voce desinstalar o app, o link
+continua o mesmo.
+
+## Requisitos (para compilar na sua maquina)
 
 - **Android Studio** (Ladybug 2024.2 ou mais novo) com o SDK 35 instalado.
 - O JDK vem junto com o Android Studio (nao precisa instalar Java a parte).
