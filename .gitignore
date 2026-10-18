@@ -1,0 +1,28 @@
+# Gradle
+.gradle/
+build/
+app/build/
+
+# Android Studio / IntelliJ
+local.properties
+.idea/
+*.iml
+captures/
+.externalNativeBuild/
+.cxx/
+
+# Saidas de build
+*.apk
+*.aab
+*.ap_
+*.dex
+dist/
+
+# Logs
+*.log
+hs_err_pid*
+
+# Sistema operacional
+.DS_Store
+Thumbs.db
+desktop.ini

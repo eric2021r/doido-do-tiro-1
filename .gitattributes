@@ -1,0 +1,22 @@
+# Normaliza os finais de linha no repositorio (LF) para o build no Linux.
+* text=auto
+
+*.kt text
+*.kts text
+*.java text
+*.xml text
+*.md text
+*.pro text
+*.properties text
+
+# O script gradlew TEM que chegar no Linux com LF, senao o "bad interpreter".
+gradlew text eol=lf
+*.bat text eol=crlf
+
+# Binarios
+*.jar binary
+*.apk binary
+*.aab binary
+*.png binary
+*.jpg binary
+*.keystore binary
