@@ -9,8 +9,9 @@ import android.view.WindowManager
 import android.widget.FrameLayout
 
 /**
- * Monta a pilha de telas do jogo: o SurfaceView do OpenGL embaixo e a HudView
- * (controles + HUD) por cima.
+ * Monta a pilha de telas do jogo: o SurfaceView do OpenGL embaixo, a HudView
+ * (controles + HUD) no meio e a MenuView por cima, que so responde quando o
+ * jogo esta no menu inicial.
  */
 class MainActivity : Activity() {
 
@@ -23,11 +24,13 @@ class MainActivity : Activity() {
         game = Game(vibratorOrNull())
         gameView = GameView(this, game)
         val hudView = HudView(this, game)
+        val menuView = MenuView(this, game)
 
         val root = FrameLayout(this)
         val matchParent = FrameLayout.LayoutParams.MATCH_PARENT
         root.addView(gameView, FrameLayout.LayoutParams(matchParent, matchParent))
         root.addView(hudView, FrameLayout.LayoutParams(matchParent, matchParent))
+        root.addView(menuView, FrameLayout.LayoutParams(matchParent, matchParent))
         setContentView(root)
 
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)

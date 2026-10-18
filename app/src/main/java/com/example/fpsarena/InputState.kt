@@ -25,6 +25,8 @@ object InputState {
     private var lookDy = 0f
     private var jumpPending = false
     private var reloadPending = false
+    private var switchPending = false
+    private var aimPending = false
 
     /** Soma o arrasto do dedo usado para girar a camera. */
     fun addLook(dx: Float, dy: Float) {
@@ -68,6 +70,30 @@ object InputState {
         }
     }
 
+    fun requestSwitch() {
+        synchronized(lock) { switchPending = true }
+    }
+
+    fun consumeSwitch(): Boolean {
+        synchronized(lock) {
+            val value = switchPending
+            switchPending = false
+            return value
+        }
+    }
+
+    fun requestAim() {
+        synchronized(lock) { aimPending = true }
+    }
+
+    fun consumeAim(): Boolean {
+        synchronized(lock) {
+            val value = aimPending
+            aimPending = false
+            return value
+        }
+    }
+
     /** Zera tudo (usado ao reiniciar a partida). */
     fun clear() {
         synchronized(lock) {
@@ -75,6 +101,8 @@ object InputState {
             lookDy = 0f
             jumpPending = false
             reloadPending = false
+            switchPending = false
+            aimPending = false
         }
         moveX = 0f
         moveY = 0f

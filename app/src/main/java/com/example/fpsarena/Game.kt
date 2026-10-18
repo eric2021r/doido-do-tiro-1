@@ -9,9 +9,9 @@ import kotlin.math.sin
 import kotlin.math.sqrt
 import kotlin.random.Random
 
-enum class GameState { PLAYING, WAVE_CLEAR, GAME_OVER }
+enum class GameState { MENU, PLAYING, WAVE_CLEAR, GAME_OVER }
 
-/** Um inimigo simples do tipo "avanca e ataca corpo a corpo". */
+/** Inimigo simples: avanca ate o jogador e ataca de perto. */
 class Enemy(x0: Float, z0: Float) {
     var x = x0
     var z = z0
@@ -22,11 +22,50 @@ class Enemy(x0: Float, z0: Float) {
     var yaw = 0f
     var speed = 2.2f
     var walkPhase = 0f
+    /** Angulo usado na vitrine do menu. */
+    var orbit = 0f
+    /** 0 = de pe, 1 = terminou de cair e desaparecer. */
+    var deathT = 0f
+
+    val gone: Boolean get() = !alive && deathT >= 1f
+
+    /** 0 = de pe, 1 = deitado no chao. Ja com suavizacao de aceleracao. */
+    val fallFactor: Float
+        get() {
+            if (alive) return 0f
+            val t = (deathT / 0.32f).coerceIn(0f, 1f)
+            return t * t
+        }
+
+    /** Opacidade do corpo: fica solido e depois desaparece. */
+    val corpseAlpha: Float
+        get() {
+            if (alive) return 1f
+            if (deathT <= 0.72f) return 1f
+            return ((1f - deathT) / 0.28f).coerceIn(0f, 1f)
+        }
+}
+
+/** Granada arremessada: cai, quica e explode depois do pavio. */
+class Grenade(x0: Float, y0: Float, z0: Float, vx0: Float, vy0: Float, vz0: Float) {
+    var x = x0
+    var y = y0
+    var z = z0
+    var vx = vx0
+    var vy = vy0
+    var vz = vz0
+    var fuse = 1.7f
+    var spin = 0f
+}
+
+/** Onda de choque visual da explosao. */
+class Explosion(val x: Float, val y: Float, val z: Float) {
+    var t = 0f
 }
 
 /**
- * Estado completo da partida: jogador, inimigos, arma e ondas.
- * Todo o update roda na thread de render do OpenGL; a HudView apenas le os campos.
+ * Estado completo da partida. Todo o update roda na thread de render do OpenGL;
+ * as views (HUD e menu) apenas leem os campos publicos.
  */
 class Game(private val vibrator: Vibrator? = null) {
 
@@ -37,15 +76,21 @@ class Game(private val vibrator: Vibrator? = null) {
         const val ENEMY_HEIGHT = 1.9f
         const val ENEMY_DAMAGE = 9f
         const val MAX_SHOOT_DISTANCE = 90f
+        const val GRENADE_RADIUS = 4.8f
+        const val GRENADE_DAMAGE = 165f
+        const val MENU_ORBIT_RADIUS = 13f
+        const val MENU_CAMERA_HEIGHT = 4.3f
 
         private const val TAU = 6.2831855f
         private const val WALK_SPEED = 5.0f
+        private const val AIM_SPEED = 2.2f
         private const val JUMP_SPEED = 6.4f
         private const val GRAVITY = 19f
-        private const val FIRE_INTERVAL = 0.105f
-        private const val RELOAD_DURATION = 1.5f
         private const val LOOK_SENSITIVITY = 0.0042f
+        private const val AIM_SENSITIVITY = 0.30f
         private const val ENEMY_HIT_RADIUS = 0.58f
+        private const val CORPSE_DURATION = 1.7f
+        private const val GRENADE_SPEED = 15.5f
     }
 
     val level = Level()
@@ -63,24 +108,35 @@ class Game(private val vibrator: Vibrator? = null) {
     var health = 100f
     val maxHealth = 100f
 
-    // ------------------------------------------------------------------- arma
-    var ammo = 30
-    val magSize = 30
-    var reserve = 150
+    // ------------------------------------------------------------------- armas
+    var weaponIndex = 1
+    val mags = IntArray(Weapons.ALL.size)
+    val reserves = IntArray(Weapons.ALL.size)
     var reloading = false
     private var reloadTimer = 0f
     private var fireCooldown = 0f
+    private var switchTimer = 0f
+    private var triggerWasHeld = false
+    /** Mira telescopica ligada (so faz sentido na sniper). */
+    var aiming = false
     var spread = 0f
+
+    val currentWeapon: Weapon get() = Weapons.ALL[weaponIndex]
+    val currentMag: Int get() = mags[weaponIndex]
+    val currentReserve: Int get() = reserves[weaponIndex]
+    val canAim: Boolean get() = currentWeapon.type == WeaponType.SNIPER
 
     // ------------------------------------------------------------------ placar
     var score = 0
     var wave = 1
     var kills = 0
     var enemiesLeft = 0
-    var state = GameState.PLAYING
+    var state = GameState.MENU
     var message = ""
     var messageTimer = 0f
     private var waveCooldown = 0f
+    /** Evita marcar "onda concluida" antes de qualquer onda existir. */
+    private var waveSpawned = false
 
     // ------------------------------------------------------- efeitos visuais
     var recoil = 0f
@@ -93,38 +149,66 @@ class Game(private val vibrator: Vibrator? = null) {
     private var bobPhase = 0f
     private var shakeAmount = 0f
     var time = 0f
+    var menuAngle = 0f
 
-    /** Tracante do ultimo disparo (linha do cano ate o ponto de impacto). */
+    /** Tracante do ultimo disparo. */
     var tracerTimer = 0f
     val tracerStart = FloatArray(3)
     val tracerEnd = FloatArray(3)
 
     val enemies = ArrayList<Enemy>()
+    val grenades = ArrayList<Grenade>()
+    val explosions = ArrayList<Explosion>()
 
-    /** Pedido de reinicio vindo da UI; aplicado no inicio do proximo update. */
     @Volatile
     private var restartRequested = false
 
-    /** A HudView chama isto em vez de reset(), que so roda na thread de render. */
-    fun requestRestart() {
-        restartRequested = true
-    }
+    @Volatile
+    private var menuRequested = false
 
     val reloadProgress: Float
-        get() = if (reloading) (1f - reloadTimer / RELOAD_DURATION).coerceIn(0f, 1f) else 1f
+        get() {
+            val duration = currentWeapon.reloadTime
+            if (!reloading || duration <= 0f) return 1f
+            return (1f - reloadTimer / duration).coerceIn(0f, 1f)
+        }
 
     val aimPitch: Float get() = (pitch + shakePitch).coerceIn(-1.45f, 1.45f)
     val aimYaw: Float get() = yaw + shakeYaw
 
+    /** Queda da arma ao trocar de equipamento (0 = pronta, 1 = abaixada). */
+    val switchDrop: Float get() = (switchTimer / 0.25f).coerceIn(0f, 1f)
+
     init {
-        reset()
+        goToMenu()
     }
 
     // ========================================================================
     // Ciclo de vida
     // ========================================================================
 
-    fun reset() {
+    /** A UI pede o reinicio; a troca de estado acontece na thread de render. */
+    fun requestRestart() {
+        restartRequested = true
+    }
+
+    fun requestMenu() {
+        menuRequested = true
+    }
+
+    fun goToMenu() {
+        reset()
+        state = GameState.MENU
+        spawnMenuShowcase()
+    }
+
+    fun startNewGame() {
+        reset()
+        state = GameState.PLAYING
+        spawnWave()
+    }
+
+    private fun reset() {
         px = level.playerStart[0]
         pz = level.playerStart[2]
         py = 0f
@@ -134,20 +218,27 @@ class Game(private val vibrator: Vibrator? = null) {
         pitch = 0f
 
         health = maxHealth
-        ammo = magSize
-        reserve = 150
+        weaponIndex = 1
+        aiming = false
+        for (i in Weapons.ALL.indices) {
+            mags[i] = Weapons.ALL[i].magSize
+            reserves[i] = Weapons.ALL[i].startReserve
+        }
         reloading = false
         reloadTimer = 0f
         fireCooldown = 0f
+        switchTimer = 0f
+        triggerWasHeld = false
         spread = 0f
 
         score = 0
         wave = 1
         kills = 0
-        state = GameState.PLAYING
+        enemiesLeft = 0
         message = ""
         messageTimer = 0f
         waveCooldown = 0f
+        waveSpawned = false
 
         recoil = 0f
         muzzleFlash = 0f
@@ -161,8 +252,24 @@ class Game(private val vibrator: Vibrator? = null) {
         time = 0f
         tracerTimer = 0f
 
+        enemies.clear()
+        grenades.clear()
+        explosions.clear()
         InputState.clear()
-        spawnWave()
+    }
+
+    /** Inimigos parados em circulo, so para a arena do menu nao ficar vazia. */
+    private fun spawnMenuShowcase() {
+        val count = 5
+        for (i in 0 until count) {
+            val angle = TAU * i / count
+            val enemy = Enemy(cos(angle) * 8.5f, sin(angle) * 8.5f)
+            enemy.orbit = angle
+            enemy.yaw = atan2(-enemy.x, -enemy.z)
+            enemy.speed = 0f
+            enemies.add(enemy)
+        }
+        enemiesLeft = enemies.size
     }
 
     private fun spawnWave() {
@@ -181,8 +288,7 @@ class Game(private val vibrator: Vibrator? = null) {
             placed++
         }
 
-        // Rede de seguranca: se a arena estiver muito cheia, usa pontos fixos
-        // livres. A onda nunca pode ficar vazia, senao o jogo nao avanca.
+        // Rede de seguranca: se a arena estiver muito cheia, usa pontos fixos.
         if (enemies.isEmpty()) {
             val fallback = arrayOf(
                 floatArrayOf(0f, 0f),
@@ -201,6 +307,7 @@ class Game(private val vibrator: Vibrator? = null) {
         }
 
         enemiesLeft = enemies.size
+        waveSpawned = true
         message = "ONDA $wave"
         messageTimer = 2.2f
     }
@@ -212,7 +319,11 @@ class Game(private val vibrator: Vibrator? = null) {
     fun update(dtRaw: Float) {
         if (restartRequested) {
             restartRequested = false
-            reset()
+            startNewGame()
+        }
+        if (menuRequested) {
+            menuRequested = false
+            goToMenu()
         }
 
         val dt = dtRaw.coerceIn(0f, 0.05f)
@@ -223,27 +334,46 @@ class Game(private val vibrator: Vibrator? = null) {
         if (damageFlash > 0f) damageFlash -= dt
         if (tracerTimer > 0f) tracerTimer -= dt
         if (messageTimer > 0f) messageTimer -= dt
+        if (switchTimer > 0f) switchTimer -= dt
         recoil *= (1f - min(1f, dt * 11f))
         shakeAmount *= (1f - min(1f, dt * 6f))
         shakeYaw = (random.nextFloat() - 0.5f) * shakeAmount * 0.09f
         shakePitch = (random.nextFloat() - 0.5f) * shakeAmount * 0.09f
 
-        // A camera continua consumindo o arrasto mesmo na tela de game over,
-        // para o acumulador nao explodir ao voltar para o jogo.
+        if (state == GameState.MENU) {
+            // Descarta qualquer toque acumulado enquanto o menu esta aberto.
+            InputState.consumeLook()
+            InputState.consumeJump()
+            InputState.consumeReload()
+            InputState.consumeSwitch()
+            InputState.consumeAim()
+            InputState.firing = false
+            updateMenu(dt)
+            return
+        }
+
         val look = InputState.consumeLook()
         if (state == GameState.GAME_OVER) {
             InputState.consumeJump()
             InputState.consumeReload()
+            InputState.consumeSwitch()
+            InputState.consumeAim()
             return
         }
 
-        yaw -= look[0] * LOOK_SENSITIVITY
-        pitch -= look[1] * LOOK_SENSITIVITY
+        val sensitivity = if (aiming) LOOK_SENSITIVITY * AIM_SENSITIVITY else LOOK_SENSITIVITY
+        yaw -= look[0] * sensitivity
+        pitch -= look[1] * sensitivity
         if (yaw > TAU || yaw < -TAU) yaw %= TAU
         pitch = pitch.coerceIn(-1.45f, 1.45f)
 
+        if (InputState.consumeSwitch()) cycleWeapon()
+        if (InputState.consumeAim()) toggleAim()
+
         updateMovement(dt)
         updateWeapon(dt)
+        updateGrenades(dt)
+        updateExplosions(dt)
         updateEnemies(dt)
 
         if (state == GameState.WAVE_CLEAR) {
@@ -252,9 +382,26 @@ class Game(private val vibrator: Vibrator? = null) {
                 wave++
                 state = GameState.PLAYING
                 health = min(maxHealth, health + 25f)
-                reserve += 90
+                for (i in Weapons.ALL.indices) {
+                    reserves[i] += Weapons.refillFor(i)
+                }
                 spawnWave()
             }
+        }
+    }
+
+    private fun updateMenu(dt: Float) {
+        menuAngle += dt * 0.11f
+        if (menuAngle > TAU) menuAngle -= TAU
+
+        for (i in enemies.indices) {
+            val enemy = enemies[i]
+            enemy.orbit += dt * 0.30f
+            enemy.x = cos(enemy.orbit) * 8.5f
+            enemy.z = sin(enemy.orbit) * 8.5f
+            // Vira de frente para fora, encarando a camera que orbita.
+            enemy.yaw = atan2(-enemy.x, -enemy.z)
+            enemy.walkPhase += dt * 6f
         }
     }
 
@@ -276,13 +423,13 @@ class Game(private val vibrator: Vibrator? = null) {
         }
 
         val intensity = min(1f, length)
-        moveWithCollision(dirX * WALK_SPEED * dt, dirZ * WALK_SPEED * dt)
+        val speed = if (aiming) AIM_SPEED else WALK_SPEED
+        moveWithCollision(dirX * speed * dt, dirZ * speed * dt)
 
-        // Balanco da camera ao andar (deixa o movimento com peso).
         val movingOnGround = intensity > 0.15f && grounded
         if (movingOnGround) {
-            bobPhase += dt * 9f
-            bob = sin(bobPhase) * 1f
+            bobPhase += dt * (if (aiming) 4.5f else 9f)
+            bob = sin(bobPhase) * (if (aiming) 0.4f else 1f)
         } else {
             bob *= 0.86f
             bobPhase = 0f
@@ -300,8 +447,11 @@ class Game(private val vibrator: Vibrator? = null) {
             grounded = true
         }
 
-        // Espalhamento do tiro: maior em movimento e ao pular.
-        spread = 0.004f + intensity * 0.012f + (if (grounded) 0f else 0.018f)
+        val weapon = currentWeapon
+        spread = when {
+            aiming -> weapon.spreadIdle * 0.35f
+            else -> weapon.spreadIdle + intensity * weapon.spreadMoving + (if (grounded) 0f else 0.02f)
+        }
     }
 
     private fun moveWithCollision(dx: Float, dz: Float) {
@@ -311,82 +461,256 @@ class Game(private val vibrator: Vibrator? = null) {
         if (!level.isBlocked(px, nextZ, PLAYER_RADIUS)) pz = nextZ
     }
 
+    // ========================================================================
+    // Armas
+    // ========================================================================
+
     private fun updateWeapon(dt: Float) {
         if (fireCooldown > 0f) fireCooldown -= dt
+
+        // Deteccao de "apertou agora": armas nao automaticas precisam de um
+        // toque novo no gatilho para cada tiro.
+        val trigger = InputState.firing
+        val freshPress = trigger && !triggerWasHeld
+        triggerWasHeld = trigger
 
         if (reloading) {
             reloadTimer -= dt
             if (reloadTimer <= 0f) finishReload()
             return
         }
-
         if (InputState.consumeReload()) {
             startReload()
             return
         }
+        if (!trigger || fireCooldown > 0f) return
 
-        if (InputState.firing && fireCooldown <= 0f) {
-            if (ammo > 0) shoot() else startReload()
+        val weapon = currentWeapon
+        if (!weapon.automatic && !freshPress) return
+
+        when {
+            weapon.explosive -> if (mags[weaponIndex] > 0) throwGrenade()
+            mags[weaponIndex] > 0 -> fireHitscan(weapon)
+            else -> startReload()
         }
     }
 
+    /** Troca para a proxima arma (o botao TROCAR chama isto). */
+    fun cycleWeapon() {
+        weaponIndex = (weaponIndex + 1) % Weapons.ALL.size
+        reloading = false
+        reloadTimer = 0f
+        aiming = false
+        switchTimer = 0.25f
+        fireCooldown = maxOf(fireCooldown, 0.2f)
+    }
+
+    /** Liga/desliga a luneta da sniper. */
+    fun toggleAim() {
+        if (!canAim) return
+        if (reloading) return
+        aiming = !aiming
+        switchTimer = 0.18f
+    }
+
     private fun startReload() {
-        if (reloading || ammo >= magSize || reserve <= 0) return
+        val weapon = currentWeapon
+        if (reloading || weapon.reloadTime <= 0f) return
+        if (mags[weaponIndex] >= weapon.magSize || reserves[weaponIndex] <= 0) return
         reloading = true
-        reloadTimer = RELOAD_DURATION
+        reloadTimer = weapon.reloadTime
     }
 
     private fun finishReload() {
-        val needed = magSize - ammo
-        val taken = min(needed, reserve)
-        ammo += taken
-        reserve -= taken
+        val weapon = currentWeapon
+        val needed = weapon.magSize - mags[weaponIndex]
+        val taken = min(needed, reserves[weaponIndex])
+        mags[weaponIndex] += taken
+        reserves[weaponIndex] -= taken
         reloading = false
         reloadTimer = 0f
     }
 
-    private fun shoot() {
-        ammo--
-        fireCooldown = FIRE_INTERVAL
-        recoil = min(1f, recoil + 0.5f)
-        muzzleFlash = 0.055f
-        shakeAmount = min(0.7f, shakeAmount + 0.1f)
-        vibrate(10)
+    private fun fireHitscan(weapon: Weapon) {
+        mags[weaponIndex]--
+        fireCooldown = weapon.fireInterval
+        recoil = min(1f, recoil + weapon.recoil)
+        muzzleFlash = if (weapon.type == WeaponType.SHOTGUN) 0.085f else 0.055f
+        shakeAmount = min(0.9f, shakeAmount + 0.08f + weapon.recoil * 0.12f)
+        vibrate(if (weapon.type == WeaponType.SNIPER) 30L else 10L)
 
         val eyeY = py + EYE_HEIGHT
         val cp = cos(pitch)
         val sp = sin(pitch)
 
-        var dirX = -sin(yaw) * cp + (random.nextFloat() - 0.5f) * spread
-        var dirY = sp + (random.nextFloat() - 0.5f) * spread
-        var dirZ = -cos(yaw) * cp + (random.nextFloat() - 0.5f) * spread
-        val length = sqrt(dirX * dirX + dirY * dirY + dirZ * dirZ)
-        dirX /= length
-        dirY /= length
-        dirZ /= length
+        var firstHitT = MAX_SHOOT_DISTANCE
+        for (pellet in 0 until weapon.pellets) {
+            var dirX = -sin(yaw) * cp + (random.nextFloat() - 0.5f) * spread
+            var dirY = sp + (random.nextFloat() - 0.5f) * spread
+            var dirZ = -cos(yaw) * cp + (random.nextFloat() - 0.5f) * spread
+            val length = sqrt(dirX * dirX + dirY * dirY + dirZ * dirZ)
+            dirX /= length
+            dirY /= length
+            dirZ /= length
 
-        val hit = raycast(px, eyeY, pz, dirX, dirY, dirZ, MAX_SHOOT_DISTANCE)
-
-        tracerStart[0] = px + dirX * 0.5f + cos(yaw) * 0.16f
-        tracerStart[1] = eyeY + dirY * 0.5f - 0.14f
-        tracerStart[2] = pz + dirZ * 0.5f - sin(yaw) * 0.16f
-        tracerEnd[0] = px + dirX * hit.distance
-        tracerEnd[1] = eyeY + dirY * hit.distance
-        tracerEnd[2] = pz + dirZ * hit.distance
-        tracerTimer = 0.05f
-
-        val enemy = hit.enemy
-        if (enemy != null) {
-            enemy.health -= 34f
-            enemy.hitFlash = 0.16f
-            hitMarker = 0.22f
-            if (enemy.health <= 0f) {
-                enemy.alive = false
-                kills++
-                score += 100
+            val hit = raycast(px, eyeY, pz, dirX, dirY, dirZ, MAX_SHOOT_DISTANCE)
+            if (pellet == 0) {
+                firstHitT = hit.distance
+                tracerStart[0] = px + dirX * 0.5f + cos(yaw) * 0.16f
+                tracerStart[1] = eyeY + dirY * 0.5f - 0.14f
+                tracerStart[2] = pz + dirZ * 0.5f - sin(yaw) * 0.16f
+                tracerEnd[0] = px + dirX * hit.distance
+                tracerEnd[1] = eyeY + dirY * hit.distance
+                tracerEnd[2] = pz + dirZ * hit.distance
+                tracerTimer = if (weapon.type == WeaponType.SNIPER) 0.09f else 0.05f
             }
+            val enemy = hit.enemy ?: continue
+            damageEnemy(enemy, weapon.damage)
+            hitMarker = 0.22f
+        }
+
+        // Fallback: se nenhum balim acertou, o tracante segue reto.
+        if (weapon.pellets > 1 && firstHitT >= MAX_SHOOT_DISTANCE) {
+            tracerEnd[0] = px - sin(yaw) * cp * MAX_SHOOT_DISTANCE
+            tracerEnd[1] = eyeY + sp * MAX_SHOOT_DISTANCE
+            tracerEnd[2] = pz - cos(yaw) * cp * MAX_SHOOT_DISTANCE
         }
     }
+
+    private fun throwGrenade() {
+        mags[weaponIndex]--
+        fireCooldown = currentWeapon.fireInterval
+        recoil = min(1f, recoil + 0.6f)
+        vibrate(12)
+
+        val eyeY = py + EYE_HEIGHT
+        val cp = cos(pitch)
+        val sp = sin(pitch)
+        val dirX = -sin(yaw) * cp
+        val dirY = sp
+        val dirZ = -cos(yaw) * cp
+
+        grenades.add(
+            Grenade(
+                px + dirX * 0.7f,
+                eyeY + dirY * 0.7f - 0.12f,
+                pz + dirZ * 0.7f,
+                dirX * GRENADE_SPEED,
+                dirY * GRENADE_SPEED + 2.6f,
+                dirZ * GRENADE_SPEED + 0f
+            )
+        )
+    }
+
+    private fun updateGrenades(dt: Float) {
+        var index = 0
+        while (index < grenades.size) {
+            val grenade = grenades[index]
+            grenade.fuse -= dt
+            grenade.spin += dt * 12f
+
+            grenade.vy -= 16f * dt
+            var nextX = grenade.x + grenade.vx * dt
+            var nextY = grenade.y + grenade.vy * dt
+            var nextZ = grenade.z + grenade.vz * dt
+
+            if (nextY <= 0.12f) {
+                nextY = 0.12f
+                grenade.vy = -grenade.vy * 0.42f
+                grenade.vx *= 0.72f
+                grenade.vz *= 0.72f
+                if (abs(grenade.vy) < 0.8f) grenade.vy = 0f
+            }
+            if (level.isBlocked(nextX, grenade.z, 0.16f)) {
+                grenade.vx = -grenade.vx * 0.45f
+                nextX = grenade.x
+            }
+            if (level.isBlocked(grenade.x, nextZ, 0.16f)) {
+                grenade.vz = -grenade.vz * 0.45f
+                nextZ = grenade.z
+            }
+            grenade.x = nextX
+            grenade.y = nextY
+            grenade.z = nextZ
+
+            // Bateu em alguem: explode na hora.
+            var touchedEnemy = false
+            for (i in enemies.indices) {
+                val enemy = enemies[i]
+                if (!enemy.alive) continue
+                val dx = enemy.x - grenade.x
+                val dz = enemy.z - grenade.z
+                if (dx * dx + dz * dz < 0.9f && grenade.y < ENEMY_HEIGHT) {
+                    touchedEnemy = true
+                    break
+                }
+            }
+
+            if (grenade.fuse <= 0f || touchedEnemy) {
+                explode(grenade.x, grenade.y, grenade.z)
+                grenades.removeAt(index)
+                continue
+            }
+            index++
+        }
+    }
+
+    private fun explode(x: Float, y: Float, z: Float) {
+        explosions.add(Explosion(x, y, z))
+        vibrate(35)
+
+        for (i in enemies.indices) {
+            val enemy = enemies[i]
+            if (!enemy.alive) continue
+            val dx = enemy.x - x
+            val dy = 1.0f - y
+            val dz = enemy.z - z
+            val distance = sqrt(dx * dx + dy * dy + dz * dz)
+            if (distance > GRENADE_RADIUS) continue
+            val falloff = 1f - distance / GRENADE_RADIUS
+            damageEnemy(enemy, GRENADE_DAMAGE * falloff)
+        }
+
+        // Susto na camera se a explosao foi perto do jogador.
+        val dx = px - x
+        val dz = pz - z
+        val distanceToPlayer = sqrt(dx * dx + dz * dz)
+        if (distanceToPlayer < 12f) {
+            val strength = 1f - distanceToPlayer / 12f
+            shakeAmount = min(1.2f, shakeAmount + 1.1f * strength)
+            damageFlash = maxOf(damageFlash, 0.35f * strength)
+        }
+    }
+
+    private fun updateExplosions(dt: Float) {
+        var index = 0
+        while (index < explosions.size) {
+            val explosion = explosions[index]
+            explosion.t += dt
+            if (explosion.t >= 0.55f) {
+                explosions.removeAt(index)
+                continue
+            }
+            index++
+        }
+    }
+
+    private fun damageEnemy(enemy: Enemy, amount: Float) {
+        if (!enemy.alive) return
+        enemy.health -= amount
+        enemy.hitFlash = 0.16f
+        if (enemy.health <= 0f) {
+            enemy.health = 0f
+            enemy.alive = false
+            enemy.deathT = 0f
+            kills++
+            score += 100
+        }
+    }
+
+    // ========================================================================
+    // Tiro (raycast)
+    // ========================================================================
 
     private class RayHit(val distance: Float, val enemy: Enemy?)
 
@@ -397,19 +721,16 @@ class Game(private val vibrator: Vibrator? = null) {
     ): RayHit {
         var solidDistance = maxDistance
 
-        // Piso.
         if (dy < -0.0001f) {
             val t = -oy / dy
             if (t > 0f) solidDistance = min(solidDistance, t)
         }
 
-        // Paredes, pilares e caixotes.
         for (i in level.colliders.indices) {
             val t = rayBox(ox, oy, oz, dx, dy, dz, level.colliders[i])
             if (t != null && t < solidDistance) solidDistance = t
         }
 
-        // Inimigos (cilindros verticais).
         var enemyDistance = Float.MAX_VALUE
         var hitEnemy: Enemy? = null
         for (i in enemies.indices) {
@@ -428,7 +749,6 @@ class Game(private val vibrator: Vibrator? = null) {
         return RayHit(solidDistance, null)
     }
 
-    /** Interseccao raio x caixa (slabs). Retorna a distancia ou null. */
     private fun rayBox(
         ox: Float, oy: Float, oz: Float,
         dx: Float, dy: Float, dz: Float,
@@ -462,7 +782,6 @@ class Game(private val vibrator: Vibrator? = null) {
         return if (tMin > 0f) tMin else null
     }
 
-    /** Interseccao raio x cilindro vertical do inimigo. */
     private fun rayCylinder(
         ox: Float, oy: Float, oz: Float,
         dx: Float, dy: Float, dz: Float,
@@ -488,12 +807,25 @@ class Game(private val vibrator: Vibrator? = null) {
         return t
     }
 
+    // ========================================================================
+    // Inimigos
+    // ========================================================================
+
     private fun updateEnemies(dt: Float) {
         var aliveCount = 0
 
         for (i in enemies.indices) {
             val enemy = enemies[i]
-            if (!enemy.alive) continue
+
+            // Cadaver: roda a animacao de cair e depois some.
+            if (!enemy.alive) {
+                if (enemy.deathT < 1f) {
+                    enemy.deathT += dt / CORPSE_DURATION
+                    if (enemy.deathT > 1f) enemy.deathT = 1f
+                }
+                continue
+            }
+
             aliveCount++
             if (enemy.hitFlash > 0f) enemy.hitFlash -= dt
 
@@ -519,7 +851,13 @@ class Game(private val vibrator: Vibrator? = null) {
         separateEnemies()
         enemiesLeft = aliveCount
 
-        if (aliveCount == 0 && state == GameState.PLAYING && enemies.isNotEmpty()) {
+        // Remove os corpos que ja terminaram a animacao.
+        var index = 0
+        while (index < enemies.size) {
+            if (enemies[index].gone) enemies.removeAt(index) else index++
+        }
+
+        if (aliveCount == 0 && state == GameState.PLAYING && waveSpawned) {
             state = GameState.WAVE_CLEAR
             waveCooldown = 3f
             message = "ONDA CONCLUIDA!"
@@ -536,7 +874,6 @@ class Game(private val vibrator: Vibrator? = null) {
         if (!level.isBlocked(enemy.x, nextZ, ENEMY_RADIUS)) enemy.z = nextZ
     }
 
-    /** Empurra inimigos que se sobrepoem para eles nao virarem um bloco unico. */
     private fun separateEnemies() {
         val minDistance = 1.0f
         for (i in enemies.indices) {
@@ -579,6 +916,7 @@ class Game(private val vibrator: Vibrator? = null) {
         if (health <= 0f) {
             health = 0f
             state = GameState.GAME_OVER
+            aiming = false
             message = "VOCE MORREU"
             messageTimer = 999f
             vibrate(150)
@@ -591,7 +929,7 @@ class Game(private val vibrator: Vibrator? = null) {
         try {
             v.vibrate(milliseconds)
         } catch (_: Exception) {
-            // Alguns dispositivos negam vibracao sem permissao: ignorar.
+            // Alguns aparelhos negam vibracao: ignorar.
         }
     }
 }

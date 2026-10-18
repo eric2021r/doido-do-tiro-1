@@ -4,6 +4,7 @@ import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import android.graphics.Path
 import android.graphics.RadialGradient
 import android.graphics.RectF
 import android.graphics.Shader
@@ -20,7 +21,7 @@ import kotlin.math.min
  */
 class HudView(context: Context, private val game: Game) : View(context) {
 
-    private enum class Role { MOVE, LOOK, FIRE, JUMP, RELOAD }
+    private enum class Role { MOVE, LOOK, FIRE, JUMP, RELOAD, SWITCH, AIM }
 
     private val density = resources.displayMetrics.density
     private fun dp(value: Float) = value * density
@@ -32,6 +33,7 @@ class HudView(context: Context, private val game: Game) : View(context) {
     private val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val strokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE }
     private val rect = RectF()
+    private val path = Path()
 
     private var vignettePaint: Paint? = null
 
@@ -51,6 +53,16 @@ class HudView(context: Context, private val game: Game) : View(context) {
     private var reloadX = 0f
     private var reloadY = 0f
     private var reloadRadius = 34f
+
+    private var switchX = 0f
+    private var switchY = 0f
+    private var switchRadius = 34f
+
+    private var aimX = 0f
+    private var aimY = 0f
+    private var aimRadius = 30f
+
+    private val overMenuRect = RectF()
 
     // ------------------------------------------------------------- estado touch
     private val roles = HashMap<Int, Role>()
@@ -88,6 +100,23 @@ class HudView(context: Context, private val game: Game) : View(context) {
         reloadX = w - dp(105f)
         reloadY = h - dp(212f)
 
+        switchRadius = dp(34f)
+        switchX = w - dp(232f)
+        switchY = h - dp(212f)
+
+        aimRadius = dp(30f)
+        aimX = w - dp(105f)
+        aimY = h - dp(292f)
+
+        val menuHalfWidth = dp(120f)
+        val menuCenterY = h / 2f + dp(122f)
+        overMenuRect.set(
+            w / 2f - menuHalfWidth,
+            menuCenterY - dp(28f),
+            w / 2f + menuHalfWidth,
+            menuCenterY + dp(28f)
+        )
+
         buildVignette(w.toFloat(), h.toFloat())
     }
 
@@ -106,16 +135,21 @@ class HudView(context: Context, private val game: Game) : View(context) {
     // ========================================================================
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
+        // Com o menu aberto quem trata os toques e a MenuView (esta por cima).
+        if (game.state == GameState.MENU) return false
+
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN, MotionEvent.ACTION_POINTER_DOWN -> {
                 val index = event.actionIndex
-                if (game.state == GameState.GAME_OVER) {
-                    game.requestRestart()
-                    return true
-                }
                 val id = event.getPointerId(index)
                 val x = event.getX(index)
                 val y = event.getY(index)
+
+                if (game.state == GameState.GAME_OVER) {
+                    releaseAll()
+                    if (overMenuRect.contains(x, y)) game.requestMenu() else game.requestRestart()
+                    return true
+                }
                 assignRole(id, x, y)
             }
 
@@ -155,6 +189,16 @@ class HudView(context: Context, private val game: Game) : View(context) {
         if (distance(x, y, reloadX, reloadY) < reloadRadius * 1.5f) {
             roles[id] = Role.RELOAD
             InputState.requestReload()
+            return
+        }
+        if (distance(x, y, switchX, switchY) < switchRadius * 1.5f) {
+            roles[id] = Role.SWITCH
+            InputState.requestSwitch()
+            return
+        }
+        if (game.canAim && distance(x, y, aimX, aimY) < aimRadius * 1.6f) {
+            roles[id] = Role.AIM
+            InputState.requestAim()
             return
         }
         if (distance(x, y, jumpX, jumpY) < jumpRadius * 1.5f) {
@@ -206,7 +250,7 @@ class HudView(context: Context, private val game: Game) : View(context) {
             }
             Role.LOOK -> if (lookPointer == id) lookPointer = -1
             Role.FIRE -> {
-                // Só solta o gatilho quando nenhum outro dedo continua no botao.
+                // So solta o gatilho quando nenhum outro dedo continua no botao.
                 if (!roles.containsValue(Role.FIRE)) InputState.firing = false
             }
             else -> Unit
@@ -236,14 +280,21 @@ class HudView(context: Context, private val game: Game) : View(context) {
         val w = width.toFloat()
         val h = height.toFloat()
 
-        drawVignette(canvas, w, h)
-        drawCrosshair(canvas, w, h)
-        drawTopBar(canvas, w)
-        drawHealth(canvas, h)
-        drawAmmo(canvas, w, h)
-        drawJoystick(canvas)
-        drawButtons(canvas)
-        drawMessages(canvas, w, h)
+        if (game.state != GameState.MENU) {
+            drawVignette(canvas, w, h)
+            if (game.aiming && game.canAim) {
+                drawScope(canvas, w, h)
+            } else {
+                drawCrosshair(canvas, w, h)
+            }
+            drawTopBar(canvas, w)
+            drawWeaponBar(canvas, w)
+            drawHealth(canvas, h)
+            drawAmmo(canvas, w, h)
+            drawJoystick(canvas)
+            drawButtons(canvas)
+            drawMessages(canvas, w, h)
+        }
 
         // O HUD precisa se redesenhar continuamente junto com o OpenGL.
         postInvalidateOnAnimation()
@@ -296,6 +347,57 @@ class HudView(context: Context, private val game: Game) : View(context) {
         }
     }
 
+    /** Luneta da sniper: borda preta com um circulo util no meio. */
+    private fun drawScope(canvas: Canvas, w: Float, h: Float) {
+        val cx = w / 2f
+        val cy = h / 2f
+        val radius = min(w, h) * 0.42f
+
+        path.reset()
+        path.fillType = Path.FillType.EVEN_ODD
+        path.addRect(0f, 0f, w, h, Path.Direction.CW)
+        path.addCircle(cx, cy, radius, Path.Direction.CW)
+        fillPaint.style = Paint.Style.FILL
+        fillPaint.color = Color.BLACK
+        canvas.drawPath(path, fillPaint)
+
+        // Aro interno.
+        strokePaint.style = Paint.Style.STROKE
+        strokePaint.strokeWidth = dp(5f)
+        strokePaint.color = Color.argb(220, 26, 30, 36)
+        canvas.drawCircle(cx, cy, radius - dp(3f), strokePaint)
+
+        // Cruz da luneta.
+        strokePaint.strokeWidth = dp(1.6f)
+        strokePaint.color = Color.argb(230, 232, 240, 250)
+        canvas.drawLine(cx - radius, cy, cx + radius, cy, strokePaint)
+        canvas.drawLine(cx, cy - radius, cx, cy + radius, strokePaint)
+
+        // Marcas de distancia.
+        strokePaint.strokeWidth = dp(2.4f)
+        for (i in 1..4) {
+            val offset = radius * 0.22f * i
+            val tick = if (i == 2) dp(14f) else dp(9f)
+            canvas.drawLine(cx - tick, cy + offset, cx + tick, cy + offset, strokePaint)
+            canvas.drawLine(cx - offset, cy - tick, cx - offset, cy + tick, strokePaint)
+            canvas.drawLine(cx + offset, cy - tick, cx + offset, cy + tick, strokePaint)
+        }
+
+        fillPaint.style = Paint.Style.FILL
+        fillPaint.color = Color.argb(235, 255, 90, 70)
+        canvas.drawCircle(cx, cy, dp(2.4f), fillPaint)
+
+        if (game.hitMarker > 0f) {
+            strokePaint.color = Color.rgb(255, 90, 70)
+            strokePaint.strokeWidth = dp(3f)
+            val size = dp(12f)
+            canvas.drawLine(cx - size, cy - size, cx - dp(4f), cy - dp(4f), strokePaint)
+            canvas.drawLine(cx + dp(4f), cy + dp(4f), cx + size, cy + size, strokePaint)
+            canvas.drawLine(cx + size, cy - size, cx + dp(4f), cy - dp(4f), strokePaint)
+            canvas.drawLine(cx - dp(4f), cy + dp(4f), cx - size, cy + size, strokePaint)
+        }
+    }
+
     private fun drawTopBar(canvas: Canvas, w: Float) {
         textPaint.textAlign = Paint.Align.CENTER
         textPaint.textSize = dp(19f)
@@ -314,6 +416,40 @@ class HudView(context: Context, private val game: Game) : View(context) {
         textPaint.textSize = dp(13f)
         textPaint.color = Color.rgb(170, 180, 195)
         canvas.drawText("ABATES ${game.kills}", w - dp(20f), dp(52f), textPaint)
+    }
+
+    /** Lista das armas no canto superior esquerdo, destacando a equipada. */
+    private fun drawWeaponBar(canvas: Canvas, w: Float) {
+        textPaint.textAlign = Paint.Align.LEFT
+        textPaint.textSize = dp(12f)
+
+        var x = dp(20f)
+        val y = dp(30f)
+
+        // Fundo discreto.
+        fillPaint.style = Paint.Style.FILL
+        fillPaint.color = Color.argb(90, 0, 0, 0)
+        rect.set(dp(12f), dp(10f), min(w * 0.52f, dp(560f)), dp(46f))
+        canvas.drawRoundRect(rect, dp(8f), dp(8f), fillPaint)
+
+        for (i in Weapons.ALL.indices) {
+            val weapon = Weapons.ALL[i]
+            val current = i == game.weaponIndex
+
+            val label = weapon.label
+            textPaint.textSize = dp(if (current) 14f else 12f)
+            val width = textPaint.measureText(label)
+
+            textPaint.color = if (current) Color.rgb(255, 160, 70) else Color.rgb(150, 162, 178)
+            canvas.drawText(label, x, y, textPaint)
+
+            if (current) {
+                fillPaint.style = Paint.Style.FILL
+                fillPaint.color = Color.rgb(255, 140, 50)
+                canvas.drawRect(x, y + dp(4f), x + width, y + dp(6.5f), fillPaint)
+            }
+            x += width + dp(14f)
+        }
     }
 
     private fun drawHealth(canvas: Canvas, h: Float) {
@@ -346,20 +482,28 @@ class HudView(context: Context, private val game: Game) : View(context) {
 
     private fun drawAmmo(canvas: Canvas, w: Float, h: Float) {
         val baseY = h - dp(190f)
+        val mag = game.currentMag
+        val low = mag <= game.currentWeapon.magSize / 4
 
         textPaint.textAlign = Paint.Align.RIGHT
         textPaint.textSize = dp(30f)
-        textPaint.color = if (game.ammo <= 6) Color.rgb(255, 90, 70) else Color.rgb(255, 255, 255)
-        canvas.drawText("${game.ammo}", w - dp(24f), baseY, textPaint)
+        textPaint.color = if (low) Color.rgb(255, 90, 70) else Color.rgb(255, 255, 255)
+        canvas.drawText("$mag", w - dp(24f), baseY, textPaint)
 
-        val ammoWidth = textPaint.measureText("${game.ammo}")
+        val ammoWidth = textPaint.measureText("$mag")
         textPaint.textSize = dp(16f)
         textPaint.color = Color.rgb(170, 180, 195)
-        canvas.drawText("${game.reserve}", w - dp(24f) - ammoWidth - dp(6f), baseY, textPaint)
+        canvas.drawText("${game.currentReserve}", w - dp(24f) - ammoWidth - dp(6f), baseY, textPaint)
 
-        textPaint.textSize = dp(12f)
-        textPaint.color = Color.rgb(150, 158, 172)
-        canvas.drawText("MUNICAO", w - dp(24f), baseY + dp(16f), textPaint)
+        textPaint.textSize = dp(13f)
+        textPaint.color = Color.rgb(255, 190, 120)
+        canvas.drawText(game.currentWeapon.label, w - dp(24f), baseY + dp(18f), textPaint)
+
+        if (game.currentWeapon.explosive) {
+            textPaint.textSize = dp(11f)
+            textPaint.color = Color.rgb(170, 180, 195)
+            canvas.drawText("ARRASO EM AREA", w - dp(24f), baseY + dp(34f), textPaint)
+        }
 
         if (game.reloading) {
             val barWidth = dp(110f)
@@ -397,6 +541,7 @@ class HudView(context: Context, private val game: Game) : View(context) {
         fillPaint.style = Paint.Style.FILL
         fillPaint.color = if (InputState.firing) Color.argb(190, 255, 90, 70) else Color.argb(140, 230, 70, 60)
         canvas.drawCircle(fireX, fireY, fireRadius, fillPaint)
+        strokePaint.style = Paint.Style.STROKE
         strokePaint.color = Color.argb(210, 255, 200, 190)
         strokePaint.strokeWidth = dp(3f)
         canvas.drawCircle(fireX, fireY, fireRadius, strokePaint)
@@ -420,6 +565,29 @@ class HudView(context: Context, private val game: Game) : View(context) {
         canvas.drawCircle(reloadX, reloadY, reloadRadius, strokePaint)
         textPaint.textSize = dp(11f)
         canvas.drawText("RECARGA", reloadX, reloadY + dp(4f), textPaint)
+
+        // Troca de arma
+        fillPaint.color = Color.argb(140, 150, 110, 200)
+        canvas.drawCircle(switchX, switchY, switchRadius, fillPaint)
+        strokePaint.color = Color.argb(200, 220, 200, 255)
+        canvas.drawCircle(switchX, switchY, switchRadius, strokePaint)
+        textPaint.textSize = dp(11f)
+        canvas.drawText("TROCAR", switchX, switchY + dp(4f), textPaint)
+
+        // Luneta (somente para a sniper)
+        if (game.canAim) {
+            fillPaint.color = if (game.aiming) {
+                Color.argb(200, 255, 150, 60)
+            } else {
+                Color.argb(140, 90, 110, 130)
+            }
+            canvas.drawCircle(aimX, aimY, aimRadius, fillPaint)
+            strokePaint.color = Color.argb(210, 230, 240, 250)
+            canvas.drawCircle(aimX, aimY, aimRadius, strokePaint)
+            textPaint.textSize = dp(11f)
+            textPaint.color = Color.WHITE
+            canvas.drawText("MIRA", aimX, aimY + dp(4f), textPaint)
+        }
     }
 
     private fun drawMessages(canvas: Canvas, w: Float, h: Float) {
@@ -429,7 +597,7 @@ class HudView(context: Context, private val game: Game) : View(context) {
         if (game.state == GameState.GAME_OVER) {
             fillPaint.style = Paint.Style.FILL
             fillPaint.color = Color.argb(170, 0, 0, 0)
-            canvas.drawRect(0f, cy - dp(110f), w, cy + dp(110f), fillPaint)
+            canvas.drawRect(0f, cy - dp(110f), w, cy + dp(150f), fillPaint)
 
             textPaint.textAlign = Paint.Align.CENTER
             textPaint.textSize = dp(42f)
@@ -441,9 +609,19 @@ class HudView(context: Context, private val game: Game) : View(context) {
             canvas.drawText("PONTOS ${game.score}  -  ABATES ${game.kills}", cx, cy + dp(10f), textPaint)
             canvas.drawText("CHEGOU NA ONDA ${game.wave}", cx, cy + dp(38f), textPaint)
 
-            textPaint.textSize = dp(18f)
+            textPaint.textSize = dp(17f)
             textPaint.color = Color.rgb(255, 214, 120)
-            canvas.drawText("TOQUE PARA JOGAR DE NOVO", cx, cy + dp(78f), textPaint)
+            canvas.drawText("TOQUE EM QUALQUER LUGAR PARA JOGAR DE NOVO", cx, cy + dp(78f), textPaint)
+
+            fillPaint.color = Color.argb(170, 30, 40, 52)
+            canvas.drawRoundRect(overMenuRect, dp(10f), dp(10f), fillPaint)
+            strokePaint.style = Paint.Style.STROKE
+            strokePaint.strokeWidth = dp(2f)
+            strokePaint.color = Color.rgb(160, 180, 200)
+            canvas.drawRoundRect(overMenuRect, dp(10f), dp(10f), strokePaint)
+            textPaint.textSize = dp(18f)
+            textPaint.color = Color.rgb(220, 232, 245)
+            canvas.drawText("VOLTAR AO MENU", overMenuRect.centerX(), overMenuRect.centerY() + dp(6f), textPaint)
             return
         }
 

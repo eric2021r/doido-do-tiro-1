@@ -1,9 +1,9 @@
-# Arena FPS
+# DOIDO DO TIRO
 
 Jogo de tiro em primeira pessoa (FPS) para **Android**, escrito em **Kotlin** com
 **OpenGL ES 2.0** puro. Nao usa engine, nao usa biblioteca externa e nao carrega
-nenhum arquivo de modelo ou imagem: a arena, as texturas e a arma sao geradas em
-codigo.
+nenhum arquivo de modelo ou imagem: a arena, as texturas, as armas e ate o
+boneco da tela inicial sao gerados em codigo.
 
 ## Baixar o APK pronto (nao precisa instalar nada)
 
@@ -17,6 +17,17 @@ O app aparece na gaveta como **Arena FPS**.
 
 > O pacote do build de debug e `com.example.fpsarena.debug`, entao ele convive
 > em paz com uma versao de release instalada ao mesmo tempo.
+
+## O que tem no jogo
+
+- **Menu inicial** com o nome do jogo, um operador armado estilo capa do
+  Counter-Strike 1.6 (desenhado com Canvas) e os botoes **NOVO JOGO**,
+  **COMO JOGAR** e **SAIR**.
+- **5 armas**: pistola, fuzil, shotgun, sniper e granada.
+- **Animacao de morte**: o inimigo cai de bruços e o corpo desaparece.
+- **Granada com fisica**: cai, quica nas paredes e explode em area.
+- **Luneta da sniper**: zoom real (FOV fecha) com a mira de luneta na tela.
+- Inimigos em ondas, placar, vida, municao por arma e recarga.
 
 ## Compilacao automatica (GitHub Actions)
 
@@ -82,32 +93,50 @@ adb install -r app\build\outputs\apk\debug\app-debug.apk
 |---|---|
 | Metade **esquerda** (arrastar) | Joystick de movimento. O joystick aparece onde o dedo tocar. |
 | Metade **direita** (arrastar) | Gira a camera (olhar). |
-| Botao **ATIRAR** (canto inferior direito) | Atira. Segure para tiro automatico. |
+| Botao **ATIRAR** (canto inferior direito) | Dispara a arma equipada. Com a granada selecionada, arremessa. |
 | Botao **PULO** | Pula. |
-| Botao **RECARGA** | Recarrega o pente (30 balas). |
+| Botao **RECARGA** | Recarrega o pente da arma atual. |
+| Botao **TROCAR** | Passa para a proxima arma (a lista no topo mostra qual esta equipada). |
+| Botao **MIRA** | Liga/desliga a luneta. So aparece com a **sniper** equipada. |
 
 Atalhos de teclado/mouse (uteis no emulador): `WASD` ou setas para andar,
-`Ctrl`/`Enter` para atirar, `Espaco` para pular, `R` para recarregar e arrastar
-o mouse para olhar.
+`Ctrl`/`Enter` para atirar, `Espaco` para pular, `R` para recarregar,
+`Q` para trocar de arma, `F` para a luneta e arrastar o mouse para olhar.
+
+## As armas
+
+| Arma | Dano | Pente | Recarga | Observacoes |
+|---|---|---|---|---|
+| **PISTOLA** | 30 | 12 | 1,1 s | Tiro a tiro, muito precisa, municao farta. |
+| **FUZIL** | 34 | 30 | 1,5 s | Rajada automatica, arma de uso geral. |
+| **SHOTGUN** | 16 x 8 balins | 6 | 2,0 s | Devasta de perto; o chumbo abre muito de longe. |
+| **SNIPER** | 130 | 5 | 2,4 s | Mata de um tiro; tem luneta com zoom. Mirar deixa voce lento. |
+| **GRANADA** | 165 no centro | 4 | - | Arremessada, quica e explode em area (raio de 4,8 m). |
+
+Ao limpar uma onda voce recebe municao de reserva de **todas** as armas e
+25 de vida.
 
 ## Como se joga
 
-- Cada onda traz mais inimigos. Os inimigos perseguem e atacam de perto.
-- Sao necessarios **3 tiros** para derrubar um inimigo (34 de dano por tiro).
-- Ao limpar a onda voce ganha pontos, municao de reserva e 25 de vida.
-- Se a vida chegar a zero, aparece a tela de game over; toque na tela para
-  jogar de novo.
+- Cada onda traz mais inimigos (`4 + onda * 2`, ate 20). Eles perseguem e
+  atacam de perto.
+- Ao morrer o inimigo tomba e o corpo some depois de ~1,7 s.
+- Se a vida chegar a zero, aparece a tela de game over, com a opcao de jogar de
+  novo ou **VOLTAR AO MENU**.
 
 ## Estrutura do projeto
 
 ```
 app/src/main/java/com/example/fpsarena/
-  MainActivity.kt      monta a tela (OpenGL embaixo, HUD em cima)
+  MainActivity.kt      monta a pilha (OpenGL, HUD, menu)
   GameView.kt          SurfaceView do OpenGL + teclado/mouse
-  GameRenderer.kt      loop de render: arena, inimigos, arma, tracantes
-  Game.kt              regras: jogador, tiro (raycast), IA, ondas, colisoes
+  MenuView.kt          tela inicial: titulo, botoes e o boneco estilo CS 1.6
+  GameRenderer.kt      loop de render: arena, inimigos, corpos, granadas,
+                       explosoes, arma e camera do menu
+  Game.kt              regras: jogador, IA, ondas, granadas, raycast, colisoes
+  Weapon.kt            ficha das 5 armas (dano, pente, recarga, cadencia)
   Level.kt             mapa da arena (paredes, pilares, caixotes)
-  HudView.kt           vida/municao/placar + controles de toque
+  HudView.kt           vida/municao/armas/luneta + controles de toque
   InputState.kt        ponte de input entre a UI e a thread de render
   ShaderProgram.kt     shader unico (luz direcional + neblina)
   Mesh.kt / MeshFactory.kt     malhas (cubo, quadrado) e VBOs
@@ -116,28 +145,34 @@ app/src/main/java/com/example/fpsarena/
 
 ## Onde mexer para ajustar o jogo
 
-Quase tudo que muda o "feeling" esta em `Game.kt`, no bloco `companion object`:
+**Armas:** tudo em `Weapon.kt` (bloco `object Weapons`). Cada arma tem dano,
+pente, municao de reserva, cadencia, tempo de recarga, dispersao e coice.
+
+**Regras gerais:** constantes no `companion object` de `Game.kt`.
 
 | Constante | Padrao | Efeito |
 |---|---|---|
-| `WALK_SPEED` | 5.0 | Velocidade do jogador |
-| `LOOK_SENSITIVITY` | 0.0042 | Sensibilidade do arrasto da camera |
-| `FIRE_INTERVAL` | 0.105 | Intervalo entre tiros (segundos) |
-| `RELOAD_DURATION` | 1.5 | Tempo de recarga |
-| `MAX_SHOOT_DISTANCE` | 90 | Alcance do tiro |
+| `WALK_SPEED` | 5.0 | Velocidade do jogador andando |
+| `AIM_SPEED` | 2.2 | Velocidade com a luneta ligada |
+| `LOOK_SENSITIVITY` | 0.0042 | Sensibilidade do arraste da camera |
+| `ENEMY_DAMAGE` | 9 | Dano de cada ataque de inimigo |
+| `GRENADE_RADIUS` | 4.8 | Raio da explosao |
+| `GRENADE_DAMAGE` | 165 | Dano no centro da explosao |
+| `MENU_ORBIT_RADIUS` | 13 | Raio da camera que gira no menu |
 
 Outros pontos uteis:
 
-- Dano por tiro do jogador: `enemy.health -= 34f` dentro de `shoot()`.
-- Vida dos inimigos: `Enemy.health` (padrao 100).
 - Quantidade de inimigos por onda: `spawnWave()` (`4 + wave * 2`, maximo 20).
 - Velocidade dos inimigos: `enemy.speed` em `spawnWave()`.
-- Dano que o inimigo causa: `ENEMY_DAMAGE` (padrao 9).
+- Tempo que o corpo leva para cair e sumir: `CORPSE_DURATION` em `Game.kt` e as
+  propriedades `fallFactor` / `corpseAlpha` da classe `Enemy`.
 - Mapa: bloco `init` de `Level.kt`.
+- Desenho do boneco do menu: `drawSoldier()` em `MenuView.kt` (coordenadas
+  locais de 100 x 200, escala aplicada na hora de desenhar).
 
 ## Estado atual
 
-O projeto foi escrito e conferido, mas **nao foi compilado nesta maquina**
-porque nao ha JDK nem Android SDK instalados aqui. Ao abrir no Android Studio o
-primeiro sync resolve isso; se aparecer algum erro de build, me mande a mensagem
-que eu ajusto.
+O projeto compila no GitHub Actions (o APK publicado sai de um build
+automatico). Nesta maquina nao ha JDK nem Android SDK instalados, entao a
+compilacao local nao foi feita aqui; ao abrir no Android Studio o primeiro sync
+resolve isso. Se aparecer algum erro de build, me mande a mensagem que eu ajusto.

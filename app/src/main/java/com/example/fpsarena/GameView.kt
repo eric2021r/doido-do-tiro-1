@@ -34,6 +34,8 @@ class GameView(context: Context, game: Game) : GLSurfaceView(context) {
             when (keyCode) {
                 KeyEvent.KEYCODE_SPACE -> InputState.requestJump()
                 KeyEvent.KEYCODE_R -> InputState.requestReload()
+                KeyEvent.KEYCODE_Q -> InputState.requestSwitch()
+                KeyEvent.KEYCODE_F -> InputState.requestAim()
             }
         }
         pressedKeys.add(keyCode)
@@ -86,6 +88,7 @@ class GameView(context: Context, game: Game) : GLSurfaceView(context) {
             KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_DOWN,
             KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_DPAD_RIGHT,
             KeyEvent.KEYCODE_SPACE, KeyEvent.KEYCODE_R,
+            KeyEvent.KEYCODE_Q, KeyEvent.KEYCODE_F,
             KeyEvent.KEYCODE_CTRL_LEFT, KeyEvent.KEYCODE_ENTER,
             KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_BUTTON_R1 -> true
             else -> false
